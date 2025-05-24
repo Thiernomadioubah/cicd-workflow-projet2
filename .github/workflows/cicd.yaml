@@ -1,6 +1,16 @@
 # Nom du `workflow`
 name: CI/CD avec images Docker et Docker Compose
 
+env:
+  SERVER_USER: "root"
+  # SERVER_STAGING: "78.138.45.88"
+  # SERVER_PRODUCTION: "54.37.11.162"
+  SERVER_IP: "149.202.40.181"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Événements déclenchant le `workflow`
 on:
   push:  # Déclenche le `workflow` lors d'un `push`
@@ -111,3 +121,62 @@ jobs:
           context: ./${{ matrix.path }}  # Contexte pour la construction Docker
           cache-from: type=gha  # Utilise le cache GitHub Actions
           cache-to: type=gha,mode=max  # Enregistre le cache pour les utilisations futures
+  
+  e2e:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login sur GitHub Package Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lancement des tests E2E
+        run: docker compose up --exit-code-from cypress --abort-on-container-exit
+      - name: Nettoyage
+        run: docker compose down -v --remove-orphans
+  
+  staging:
+    needs: ["e2e"]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: http://${{ env.SERVER_IP }}
+    steps:
+    - name: checkout le code
+      uses: actions/checkout@v4
+
+    - name: déployer sur le serveur
+      run: |
+          eval $(ssh-agent -s)
+          ssh-add - <<< "${{ secrets.VPS_KEY }}"
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+          scp docker-compose.prod.yml ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/root/docker-compose.prod.yml
+          ssh ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}"
+          ssh ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "docker compose -f /root/docker-compose.prod.yml up -d --force-recreate"
+
+  # deploy:
+  #   needs: ["staging"]
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: production
+  #     url: http://${{ env.SERVER_PRODUCTION }}
+  #   steps:
+  #   - name: checkout le code
+  #     uses: actions/checkout@v4
+
+  #   - name: déployer sur le serveur
+  #     run: |
+  #         eval $(ssh-agent -s)
+  #         ssh-add - <<< "${{ secrets.OVH_PROD_PKEY }}"
+  #         mkdir -p ~/.ssh
+  #         ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+  #         scp docker-compose.prod.yml ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/root/docker-compose.prod.yml
+  #         ssh ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}"
+  #         ssh ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "docker compose -f /root/docker-compose.prod.yml up -d --force-recreate"
